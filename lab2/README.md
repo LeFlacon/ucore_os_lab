@@ -160,7 +160,7 @@ default_alloc_pages(size_t n) {
 
 首先如果所有空闲块的空闲页总数都没有n个，那么无法分配，直接return。通过`list_next`遍历空闲块链表。通过`le2page`宏（定义在`memlayout.h`中）可以获得对应的指向Page的指针p。然后通过`p->property`得到此空闲块的大小，如果`≥n`，就开始重新组织空闲块。循环把这个空闲块中的每一个页初始化，`SetPageReserved`把对应的`Page`结构中的`flags`标志设置为`PG_reserved` ，表示这些页已经被使用了，将来不能被用于分配。如果选中的块大于n，那么只取n个页，就需要修改剩下的块对应的`property`。最后在空闲块链表中删除掉分配出去的块。
 
-### 1.5 `default_free_pages`函数
+#### `default_free_pages`函数
 
 116-160，需要补充。
 
