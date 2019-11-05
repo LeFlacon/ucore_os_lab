@@ -522,6 +522,8 @@ pde_t *pdep = &pgdir[PDX(la)];
 
 回顾上面的系统执行中地址映射的四个阶段，第一阶段虚拟地址等于物理地址。
 
+
+
 第二阶段，物理地址由虚拟地址加上一个基地址得到，把基地址修改为0。
 
 `kern/mm/memlayout.h`56
@@ -534,13 +536,16 @@ pde_t *pdep = &pgdir[PDX(la)];
 
 第三阶段`boot_pgdir[0] = boot_pgdir[PDX(KERNBASE)]`用来建立物理地址在0~4MB之内的三个地址间的临时映射关系，第四阶段从`gdt_init`函数开始，第三次更新了段映射，形成了新的段页式映射机制。
 
-`pmm.c`330-331
+`pmm.c`330-335
 
-因此注释掉331行，331行原先功能为取消了0~4MB之内的临时映射关系。
+因此注释掉对应语句，原先功能为取消了0~4MB之内的临时映射关系。
 
 ```
 //disable the map of virtual_addr 0~4M
 //boot_pgdir[0] = 0;
+//now the basic virtual memory map(see memalyout.h) is established.
+//check the correctness of the basic virtual memory map.
+//check_boot_pgdir();
 ```
 
 这样虚拟地址就都等于物理地址了。
