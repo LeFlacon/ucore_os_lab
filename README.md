@@ -6,3 +6,7 @@
 
 [lab2:物理内存管理](https://github.com/LeFlacon/ucore_os_lab/blob/master/lab2/README.md)
 
+[lab3:虚拟内存管理](https://github.com/LeFlacon/ucore_os_lab/blob/master/lab3/README.md)
+
+[lab4:内核线程管理](https://github.com/LeFlacon/ucore_os_lab/blob/master/lab4/README.md)
+
