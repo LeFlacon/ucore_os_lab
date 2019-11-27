@@ -1,320 +1,469 @@
-# Lab3:虚拟内存管理
+# Lab4:内核线程管理
 
-![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9bsy0tn83j30us0u07oo.jpg)
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4l4k8lcj311m0u07eo.jpg)
 
 ## 实验目的
 
-* 了解虚拟内存的Page Fault异常处理实现
-* 了解页替换算法在操作系统中的实现
+* 了解内核线程创建/执行的管理过程
+* 了解内核线程的切换和基本调度过程
 
 ## 实验内容
 
-本次实验是在实验二的基础上，借助于页表机制和实验一中涉及的中断异常处理机制，完成Page Fault异常处理和FIFO页替换算法的实现，结合磁盘提供的缓存空间，从而能够支持虚存管理，提供一个比实际物理内存空间“更大”的虚拟内存空间给系统使用。这个实验与实际操作系统中的实现比较起来要简单，不过需要了解实验一和实验二的具体实现。实际操作系统系统中的虚拟内存管理设计与实现是相当复杂的，涉及到与进程管理系统、文件系统等的交叉访问。如果大家有余力，可以尝试完成扩展练习，实现extended　clock页替换算法。
+实验2/3完成了物理和虚拟内存管理，这给创建内核线程（内核线程是一种特殊的进程）打下了提供内存管理的基础。当一个程序加载到内存中运行时，首先通过ucore OS的内存管理子系统分配合适的空间，然后就需要考虑如何分时使用CPU来“并发”执行多个程序，让每个运行的程序（这里用线程或进程表示）“感到”它们各自拥有“自己”的CPU。
+
+本次实验将首先接触的是内核线程的管理。内核线程是一种特殊的进程，内核线程与用户进程的区别有两个：
+
+* 内核线程只运行在内核态
+* 用户进程会在在用户态和内核态交替运行
+* 所有内核线程共用ucore内核内存空间，不需为每个内核线程维护单独的内存空间
+* 而用户进程需要维护各自的用户内存空间
 
 ## 练习0：填写已有实验
 
-本实验依赖实验1/2。请把你做的实验1/2的代码填入本实验中代码中有“LAB1”,“LAB2”的注释相应部分。
+本实验依赖实验1/2/3。请把你做的实验1/2/3的代码填入本实验中代码中有“LAB1”,“LAB2”,“LAB3”的注释相应部分。
 
 ---
 
-和lab2中的合并一样，利用Meld Diff软件把修改过的部分修改到lab3中。
+利用Meld Diff软件把修改过的部分修改到lab4中。
 
-具体有`kdebug.c pmm.c trap.c default_pmm.c`
+具体有`vmm.c trap.c default_pmm.c pmm.c swap_fifo.c`
 
-## 练习1：给未被映射的地址映射上物理页（需要编程）
+## 练习1：分配并初始化一个进程控制块（需要编码）
 
-完成`do_pgfault(mm/vmm.c)`函数，给未被映射的地址映射上物理页。设置访问权限的时候需要参考页面所在 VMA 的权限，同时需要注意映射物理页时需要操作内存控制结构所指定的页表，而不是内核的页表。
+`alloc_proc`函数（位于`kern/process/proc.c`中）负责分配并返回一个新的`struct proc_struct`结构，用于存储新建立的内核线程的管理信息。ucore需要对这个结构进行最基本的初始化，你需要完成这个初始化过程。
+
+>【提示】在`alloc_proc`函数的实现中，需要初始化的`proc_struct`结构中的成员变量至少包括：`state/pid/runs/kstack/need_resched/parent/mm/context/tf/cr3/flags/name`。
 
 ---
 
-`mm_struct`描述了整个进程的虚拟地址空间，mm中的每个`vma_struct`表示了一段地址连续的合法虚拟空间。
+### 1.1 当前流程总结
 
-### 1.1 `vma_struct`（vmm.h）
+* `pmm_init()`：初始化物理内存管理器；初始化空闲页，主要是初始化物理页的Page数据结构，以及建立页目录表和页表；初始化`boot_cr3`使之指向了ucore内核虚拟空间的页目录表首地址，即一级页表的起始物理地址；初始化第一个页表`boot_pgdir`；初始化GDT（全局描述符表）
+* `pic_init()`：初始化中断控制器
+* `idt_init()`：初始化`IDT`（中断描述符表）
+* `vmm_init()`：实验一个`do_pgfault()`函数达到页错误异常处理功能，以及虚拟内存相关的`mm`、`vma`结构数据的创建/销毁/查找/插入等函数
+* `proc_init()`：启动了创建内核线程的步骤，完成了`idleproc`内核线程和`initproc`内核线程的创建或复制工作
+* `ide_init()`：完成对用于页换入换出的硬盘(简称 swap 硬盘)的初始化工作
+* `swap_init()`：建立完成页面替换过程的主要功能模块，即 `swap_manager`，其中包含了页面置换算法的实现
 
-描述应用程序对虚拟内存“需求”的数据结构。
+### 1.2 `proc_struct`
+
+`kern/process/proc.h`42-57
 
 ```
-struct vma_struct {
-    struct mm_struct *vm_mm; // the set of vma using the same PDT 
-    uintptr_t vm_start;      // start addr of vma      
-    uintptr_t vm_end;        // end addr of vma, not include the vm_end itself
-    uint32_t vm_flags;       // flags of vma
-    list_entry_t list_link;  // linear list link which sorted by start addr of vma
+struct proc_struct {
+    enum proc_state state;                      // Process state
+    int pid;                                    // Process ID
+    int runs;                                   // the running times of Proces
+    uintptr_t kstack;                           // Process kernel stack
+    volatile bool need_resched;                 // bool value: need to be rescheduled to release CPU?
+    struct proc_struct *parent;                 // the parent process
+    struct mm_struct *mm;                       // Process's memory management field
+    struct context context;                     // Switch here to run process
+    struct trapframe *tf;                       // Trap frame for current interrupt
+    uintptr_t cr3;                              // CR3 register: the base addr of Page Directroy Table(PDT)
+    uint32_t flags;                             // Process flag
+    char name[PROC_NAME_LEN + 1];               // Process name
+    list_entry_t list_link;                     // Process link list 
+    list_entry_t hash_link;                     // Process hash list
 };
 ```
 
-* `vm_start`和`vm_end`描述了一个连续地址的虚拟内存空间的起始位置和结束位置，而且描述的是一个合理的地址空间范围（即严格确保 vm_start < vm_end的关系）
-* `list_link`是一个双向链表，按照从小到大的顺序把一系列用`vma_struct`表示的虚拟内存空间链接起来
-* `vm_flags`表示了这个虚拟内存空间的属性
+* `state`：进程所处的状态
+* `kstack`: 每个线程都有一个内核栈，并且位于内核地址空间的不同位置
+* `parent`：用户进程的父进程（创建它的进程）。在所有进程中，只有一个进程没有父进程，就是内核创建的第一个内核线程`idleproc`。内核根据这个父子关系建立一个树形结构，用于维护一些特殊的操作，例如确定某个进程是否可以对另外一个进程进行某种操作等等
+* `mm`：内存管理的信息，包括内存映射列表、页表指针等。`mm`成员变量在lab3中用于虚存管理。但在实际OS中，内核线程常驻内存，不需要考虑swap page问题，在lab5中涉及到了用户进程，才考虑进程用户内存空间的swap page问题，mm才会发挥作用。所以在lab4中，内核线程的`proc_struct`的成员变量`*mm=0`
+* `context`：进程的上下文，用于进程切换（参见switch.S），在 ucore中，所有的进程在内核中也是相对独立的，使用 `context` 保存寄存器的目的就在于在内核态中能够进行上下文之间的切换。实际利用`context`进行上下文切换的函数是在`kern/process/switch.S`中定义`switch_to`
+* `tf`：中断帧的指针，总是指向内核栈的某个位置。当进程从用户空间跳到内核空间时，中断帧记录了进程在被中断前的状态，当内核需要跳回用户空间时，需要调整中断帧以恢复让进程继续执行的各寄存器值。ucore内核允许嵌套中断，因此为了保证嵌套中断发生时tf 总是能够指向当前的`trapframe`，ucore 在内核栈上维护了`tf`的链
+* `cr3`：保存页表的物理地址。由于`*mm=NULL`，所以在`proc_struct`数据结构中需要有一个代替`pgdir`项来记录页表起始地址，这就是`proc_struct`数据结构中的`cr3`成员变量
+
+### 1.3 `alloc_proc`函数
+
+功能是分配一个新的`struct proc_struct`结构，初始化一些变量。
+
+`kern/process/proc.c`85-119
 
 ```
-#define VM_READ 0x00000001 //只读
-#define VM_WRITE 0x00000002 //可读写
-#define VM_EXEC 0x00000004 //可执行
+static struct proc_struct *
+alloc_proc(void) {
+    struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
+    if (proc != NULL) {
+    //LAB4:EXERCISE1 YOUR CODE
+    /*
+     * below fields in proc_struct need to be initialized
+     *       enum proc_state state;                      // Process state
+     *       int pid;                                    // Process ID
+     *       int runs;                                   // the running times of Proces
+     *       uintptr_t kstack;                           // Process kernel stack
+     *       volatile bool need_resched;                 // bool value: need to be rescheduled to release CPU?
+     *       struct proc_struct *parent;                 // the parent process
+     *       struct mm_struct *mm;                       // Process's memory management field
+     *       struct context context;                     // Switch here to run process
+     *       struct trapframe *tf;                       // Trap frame for current interrupt
+     *       uintptr_t cr3;                              // CR3 register: the base addr of Page Directroy Table(PDT)
+     *       uint32_t flags;                             // Process flag
+     *       char name[PROC_NAME_LEN + 1];               // Process name
+     */
+        //设置进程为未初始化状态
+        proc->state = PROC_UNINIT;
+        //未初始化的的进程id为-1
+        proc->pid = -1;
+        //初始化时间片
+        proc->runs = 0;
+        //内存栈的地址
+        proc->kstack = 0;
+        //是否需要调度设为不需要
+        proc->need_resched = 0;
+        //父节点设为空
+        proc->parent = NULL;
+        //内核线程常驻内存，虚拟内存设为空
+        proc->mm = NULL;
+        //上下文的初始化
+        memset(&(proc->context), 0, sizeof(struct context));
+        //中断帧指针置为空
+        proc->tf = NULL;
+        //页目录设为内核页目录表的基址
+        proc->cr3 = boot_cr3;
+        //标志位
+        proc->flags = 0;
+        //进程名
+        memset(proc->name, 0, PROC_NAME_LEN);
+    }
+    return proc;
+}
 ```
 
-* `vm_mm`是一个指针，指向一个比`vma_struct`更高的抽象层次的数据结构`mm_struct`
+### 1.4 问题
 
-在`vmm.c`里有涉及`vma_struct`的操作函数：vma_create--创建vma；insert_vma_struct--插入一个vma；find_vma--查询vma。
+请说明`proc_struct`中`struct context context`和`struct trapframe *tf`成员变量含义和在本实验中的作用是啥？（提示通过看代码和编程调试可以判断出来）
 
-### 1.2 `mm_struct`（vmm.h）
+#### `struct context context`
+
+在 ucore中，所有的进程在内核中也是相对独立的，使用`context`保存寄存器的目的就在于在内核态中能够进行上下文之间的切换。
+
+`proc.h`25-34
 
 ```
-struct mm_struct {
-    list_entry_t mmap_list;        // linear list link which sorted by start addr of vma
-    struct vma_struct *mmap_cache; // current accessed vma, used for speed purpose
-    pde_t *pgdir;                  // the PDT of these vma
-    int map_count;                 // the count of these vma
-    void *sm_priv;                   // the private data for swap manager
+struct context {
+    uint32_t eip;
+    uint32_t esp;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t esi;
+    uint32_t edi;
+    uint32_t ebp;
 };
 ```
 
-* `mmap_list`是双向链表头，链接了所有属于同一页目录表的虚拟内存空间
-* `mmap_cache`是指向当前正在使用的虚拟内存空间（“局部性”原理）
-* `pgdir`所指向的就是`mm_struct`数据结构所维护的页表，通过访问`pgdir`可以查找某虚拟地址对应的页表项是否存在以及页表项的属性等
-* `map_count`记录`mmap_list`里面链接的`vma_struct`的个数
-* `sm_priv`指向用来链接记录页访问情况的链表头
+存储了除了`eax`之外的所有通用寄存器以及`eip`的数值。
 
-### 1.3 `do_pgfault`函数（304-431）
+#### `kern/process/switch.S`中`switch_to`函数
+
+```
+.text
+.globl switch_to
+switch_to:                      # switch_to(from, to)
+
+    # save from's registers
+    movl 4(%esp), %eax          # eax points to from
+    popl 0(%eax)                # save eip !popl
+    movl %esp, 4(%eax)
+    movl %ebx, 8(%eax)
+    movl %ecx, 12(%eax)
+    movl %edx, 16(%eax)
+    movl %esi, 20(%eax)
+    movl %edi, 24(%eax)
+    movl %ebp, 28(%eax)
+
+    # restore to's registers
+    movl 4(%esp), %eax          # not 8(%esp): popped return address already
+                                # eax now points to to
+    movl 28(%eax), %ebp
+    movl 24(%eax), %edi
+    movl 20(%eax), %esi
+    movl 16(%eax), %edx
+    movl 12(%eax), %ecx
+    movl 8(%eax), %ebx
+    movl 4(%eax), %esp
+
+    pushl 0(%eax)               # push eip
+
+    ret
+```
+
+* 首先，保存前一个进程的执行现场，保存了进程在返回`switch_to`函数后的指令地址到`context.eip`中
+* 保存前一个进程的其他7个寄存器到`context`中的相应成员变量中
+* 再往后是恢复向一个进程的执行现场，这其实就是上述保存过程的逆执行过程，即从`context`的高地址的成员变量`ebp`开始，逐一把相关成员变量的值赋值给对应的寄存器
+* 把`context`中保存的下一个进程要执行的指令地址`context.eip`放到了堆栈顶，这样接下来执行最后一条指令`ret`时，会把栈顶的内容赋值给EIP寄存器，这样就切换到下一个进程执行了
+
+#### `struct trapframe *tf`
+
+`kern/trap/trap.h`62-83
+
+```
+struct trapframe {
+    struct pushregs tf_regs;
+    uint16_t tf_gs;
+    uint16_t tf_padding0;
+    uint16_t tf_fs;
+    uint16_t tf_padding1;
+    uint16_t tf_es;
+    uint16_t tf_padding2;
+    uint16_t tf_ds;
+    uint16_t tf_padding3;
+    uint32_t tf_trapno;
+    /* below here defined by x86 hardware */
+    uint32_t tf_err;
+    uintptr_t tf_eip;
+    uint16_t tf_cs;
+    uint16_t tf_padding4;
+    uint32_t tf_eflags;
+    /* below here only when crossing rings, such as from user to kernel */
+    uintptr_t tf_esp;
+    uint16_t tf_ss;
+    uint16_t tf_padding5;
+} __attribute__((packed));
+```
+
+`tf`：中断帧的指针，总是指向内核栈的某个位置（用于特权级转换）。当进程从用户空间跳到内核空间时，中断帧记录了进程在被中断前的状态。当内核需要跳回用户空间时，需要调整中断帧以恢复让进程继续执行的各寄存器值。ucore内核允许嵌套中断，因此为了保证嵌套中断发生时`tf`总是能够指向当前的`trapframe`，`ucore`在内核栈上维护了`tf`的链。
+
+#### 二者区别
+
+* 从内容上看：`trap_frame`包含了`context`的信息，除此之外，`trap_frame`还保存有段寄存器、中断号、错误码和状态寄存器等信息
+* 从作用时机来看：`context`主要用于进程切换时保存进程上下文，`trap_frame`主要用于发生中断或异常时保存进程状态
+* 当进程进行系统调用或发生中断时，会发生特权级转换，这时也会切换栈，因此需要保存栈信息到`trap_frame`，但不需要更新`context`
+
+如果是在特权态3发生了中断/异常/系统调用，则CPU会从特权态3-->特权态0，且CPU从此栈顶（当前被打断进程的内核栈顶）开始压栈来保存被中断/异常/系统调用打断的用户态执行现场。如果是在特权态0发生了中断/异常/系统调用，则CPU会从从当前内核栈指针esp所指的位置开始压栈保存被中断/异常/系统调用打断的内核态执行现场。
+
+## 练习2：为新创建的内核线程分配资源（需要编码）
+
+创建一个内核线程需要分配和设置好很多资源。`kernel_thread`函数通过调用`do_fork`函数完成具体内核线程的创建工作。`do_kernel`函数会调用`alloc_proc`函数来分配并初始化一个进程控制块，但`alloc_proc`只是找到了一小块内存用以记录进程的必要信息，并没有实际分配这些资源。ucore一般通过`do_fork`实际创建新的内核线程。`do_fork`的作用是，创建当前内核线程的一个副本，它们的执行上下文、代码、数据都一样，但是存储位置不同。在这个过程中，需要给新内核线程分配资源，并且复制原进程的状态。你需要完成在`kern/process/proc.c`中的`do_fork`函数中的处理过程。它的大致执行步骤包括：
+
+* 调用`alloc_proc`，首先获得一块用户信息块。
+* 为进程分配一个内核栈。
+* 复制原进程的内存管理信息到新进程（但内核线程不必做此事）
+* 复制原进程上下文到新进程
+* 将新进程添加到进程列表
+* 唤醒新进程
+* 返回新进程号
+
+---
+
+### 2.1 `do_fork`函数
+
+`proc.h`278-346
 
 ```
 int
-do_pgfault(struct mm_struct *mm, uint32_t error_code, uintptr_t addr) {
-    int ret = -E_INVAL;
-    //try to find a vma which include addr
-    //查询vma
-    //根据从CPU的控制寄存器CR2中获取的页访问异常的物理地址以及根据errorCode的错误类型来查找此地址是否在某个VMA的地址范围内以及是否满足正确的读写权限
-    struct vma_struct *vma = find_vma(mm, addr);
-
-    pgfault_num++;
-    //If the addr is in the range of a mm's vma?
-    //如果不在范围内
-    if (vma == NULL || vma->vm_start > addr) {
-        cprintf("not valid addr %x, and  can not find it in vma\n", addr);
-        goto failed;
+do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf) {
+	 //尝试为进程分配内存
+    int ret = -E_NO_FREE_PROC;
+    //新进程
+    struct proc_struct *proc;
+    if (nr_process >= MAX_PROCESS) {
+        goto fork_out;
     }
-    //check the error_code
-    //错误处理
-    switch (error_code & 3) {
-    default:
-            /* error code flag : default is 3 ( W/R=1, P=1): write, present */
-    case 2: /* error code flag : (W/R=1, P=0): write, not present */
-        if (!(vma->vm_flags & VM_WRITE)) {
-            cprintf("do_pgfault failed: error code flag = write AND not present, but the addr's vma cannot write\n");
-            goto failed;
-        }
-        break;
-    case 1: /* error code flag : (W/R=0, P=1): read, present */
-        cprintf("do_pgfault failed: error code flag = read AND present\n");
-        goto failed;
-    case 0: /* error code flag : (W/R=0, P=0): read, not present */
-        if (!(vma->vm_flags & (VM_READ | VM_EXEC))) {
-            cprintf("do_pgfault failed: error code flag = read AND not present, but the addr's vma cannot read or exec\n");
-            goto failed;
-        }
-    }
-    
-    uint32_t perm = PTE_U;
-    if (vma->vm_flags & VM_WRITE) {
-        perm |= PTE_W;
-    }
-    addr = ROUNDDOWN(addr, PGSIZE);
-
+    //内存不足而分配失败
     ret = -E_NO_MEM;
+    //LAB4:EXERCISE2 YOUR CODE
+    /*
+     * Some Useful MACROs, Functions and DEFINEs, you can use them in below implementation.
+     * MACROs or Functions:
+     *   alloc_proc:   create a proc struct and init fields (lab4:exercise1)
+     *   setup_kstack: alloc pages with size KSTACKPAGE as process kernel stack
+     *   copy_mm:      process "proc" duplicate OR share process "current"'s mm according clone_flags
+     *                 if clone_flags & CLONE_VM, then "share" ; else "duplicate"
+     *   copy_thread:  setup the trapframe on the  process's kernel stack top and
+     *                 setup the kernel entry point and stack of process
+     *   hash_proc:    add proc into proc hash_list
+     *   get_pid:      alloc a unique pid for process
+     *   wakup_proc:   set proc->state = PROC_RUNNABLE
+     * VARIABLES:
+     *   proc_list:    the process set's list
+     *   nr_process:   the number of process set
+     */
 
-    pte_t *ptep=NULL;
+    //    1. call alloc_proc to allocate a proc_struct
+    //    2. call setup_kstack to allocate a kernel stack for child process
+    //    3. call copy_mm to dup OR share mm according clone_flag
+    //    4. call copy_thread to setup tf & context in proc_struct
+    //    5. insert proc_struct into hash_list && proc_list
+    //    6. call wakup_proc to make the new child process RUNNABLE
+    //    7. set ret vaule using child proc's pid
+    //调用 alloc_proc() 函数申请内存块
+    if ((proc = alloc_proc()) == NULL) {
+        goto fork_out;
+    }
+    //将子进程的父节点设置为当前进程
+    proc->parent = current;
+    //调用 setup_stack() 函数为进程分配一个内核栈
+    if (setup_kstack(proc) != 0) {
+        //分配内核栈失败
+        goto bad_fork_cleanup_proc;
+    }
+    //调用 copy_mm() 函数复制父进程的内存信息到子进程
+    if (copy_mm(clone_flags, proc) != 0) {
+        goto bad_fork_cleanup_kstack;
+    }
+    //调用 copy_thread() 函数复制父进程的中断帧和上下文信息
+    copy_thread(proc, stack, tf);
 
-    // try to find a pte, if pte's PT(Page Table) isn't existed, then create a PT.
-    // (notice the 3th parameter '1')
-    //检查页表中是否有相应的表项，有就获取指向这个表项的指针
-    if ((ptep = get_pte(mm->pgdir, addr, 1)) == NULL) {
-        cprintf("get_pte in do_pgfault failed\n");
-        goto failed;
+    bool intr_flag;
+    //将新进程添加到进程的 hash 列表中
+    //全局变量static list_entry_t hash_list[HASH_LIST_SIZE]（所有进程控制块的哈希表）
+    //屏蔽中断，intr_flag 置为 1
+    local_intr_save(intr_flag);
+    {
+        //获取当前进程 PID
+        proc->pid = get_pid();
+        //建立 hash 映射
+        hash_proc(proc);
+        //将进程加入到进程的链表中
+        list_add(&proc_list, &(proc->list_link));
+        //进程数加 1
+        nr_process ++;
     }
-    //然后检查这个表项是否为空（有没有被映射过），如果为空那么pgdir_alloc_page分配一个新的物理页
-    if (*ptep == 0) { // if the phy addr isn't exist, then alloc a page & map the phy addr with logical addr
-        if (pgdir_alloc_page(mm->pgdir, addr, perm) == NULL) {
-            cprintf("pgdir_alloc_page in do_pgfault failed\n");
-            goto failed;
-        }
-    }
-    //如果这个页表项非空，那么说明这一页已经映射过了但是被保存在磁盘中，需要将这一页内存交换出来
-    else { // if this pte is a swap entry, then load data from disk to a page with phy addr
-           // and call page_insert to map the phy addr with logical addr
-        if(swap_init_ok) {
-        	  //如果是可交换的
-            struct Page *page=NULL;
-            //根据mm结构和addr地址，swap_in函数将将内存页从磁盘中载入内存
-            if ((ret = swap_in(mm, addr, &page)) != 0) {
-                cprintf("swap_in in do_pgfault failed\n");
-                goto failed;
-            }
-            //page_insert建立虚拟地址和物理地址之间的对应关系 
-            page_insert(mm->pgdir, page, addr, perm);
-            //swap_map_swappable将此页面设置为可交换的（将这个物理页框加入FIFO中）
-            swap_map_swappable(mm, addr, page, 1);
-        }
-        else {
-            cprintf("no swap_init_ok but ptep is %x, failed\n",*ptep);
-            goto failed;
-        }
-   }
-   ret = 0;
-failed:
+    //恢复中断
+    local_intr_restore(intr_flag);
+    //唤醒子进程
+    wakeup_proc(proc);
+    //返回子进程的 pid
+    ret = proc->pid;
+fork_out:
     return ret;
+
+bad_fork_cleanup_kstack:
+    put_kstack(proc);
+bad_fork_cleanup_proc:
+    kfree(proc);
+    goto fork_out;
 }
 ```
 
-### 1.4 `make qemu`
+### 2.2 问题
 
-可以获得`check_pgfault() succeeded!`的输出，说明练习一的`do_pgfault`函数可以使用。
+请说明ucore是否做到给每个新fork的线程一个唯一的id？请说明你的分析和理由。
 
-![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9bqoapj20j30db0b7aci.jpg)
+做到了。可以看`get_pid()`函数。
 
-### 1.5 问题
+`proc.h`137-169
 
-请描述页目录项（Pag Director Entry）和页表（Page Table Entry）中组成部分对ucore实现页替换算法的潜在用处。
+```
+static int
+get_pid(void) {
+    static_assert(MAX_PID > MAX_PROCESS);
+    struct proc_struct *proc;
+    list_entry_t *list = &proc_list, *le;
+    //两个静态变量last_pid以及next_safe
+    //last_pid变量保存上一次分配的PID，而next_safe和last_pid一起表示一段可以使用的PID取值范围(last_pid,next_safe)
+    static int next_safe = MAX_PID, last_pid = MAX_PID;
+    //同时要求PID的取值范围为[1,MAX_PID]
+    if (++ last_pid >= MAX_PID) {
+        last_pid = 1;
+        goto inside;
+    }
+    //每次调用 get_pid 时，除了确定一个可以分配的 PID 外，还需要确定 next_safe 来实现均摊以此优化时间复杂度
+    if (last_pid >= next_safe) {
+    inside:
+        next_safe = MAX_PID;
+    repeat:
+        le = list;
+        //PID 的确定过程中会检查所有进程的 PID，来确保 PID 是唯一的
+        while ((le = list_next(le)) != list) {
+            proc = le2proc(le, list_link);
+            if (proc->pid == last_pid) {
+                if (++ last_pid >= next_safe) {
+                    if (last_pid >= MAX_PID) {
+                        last_pid = 1;
+                    }
+                    next_safe = MAX_PID;
+                    goto repeat;
+                }
+            }
+            else if (proc->pid > last_pid && next_safe > proc->pid) {
+                next_safe = proc->pid;
+            }
+        }
+    }
+    return last_pid;
+}
+```
 
-`PTE_A`表示内存页是否被访问过，`PTE_D`表示内存页是否被修改过。时钟（Clock）页替换算法需要`PTE_A`，跳过了访问位为1的页；改进的时钟（Enhanced Clock）页替换算法需要`PTE_A`和`PTE_D`，优先淘汰未被引用也未被修改的页。
+## 练习3：阅读代码，理解`proc_run`函数和它调用的函数如何完成进程切换的。（无编码工作）
 
-### 1.6 问题
+请在实验报告中简要说明你对`proc_run`函数的分析。并回答如下问题：
 
-如果ucore的缺页服务例程在执行过程中访问内存，出现了页访问异常，请问硬件要做哪些事情？
+* 在本实验的执行过程中，创建且运行了几个内核线程？
+* 语句`local_intr_save(intr_flag);....local_intr_restore(intr_flag);`在这里有何作用?请说明理由
 
-产生页访问异常后，CPU把引起页访问异常的线性地址装到寄存器CR2中，并给出了出错码errorCode，说明了页访问异常的类型。
+完成代码编写后，编译并运行代码：`make qemu`
 
-（CPU在当前内核栈保存当前被打断的程序现场，即依次压入当前被打断程序使用的EFLAGS，CS，EIP，errorCode，页访问异常的中断号是0xE，CPU把异常中断号0xE对应的中断服务例程的地址加载到CS和EIP寄存器中，开始执行中断服务例程）
-
-## 练习2：补充完成基于FIFO的页面替换算法（需要编程）
-
-完成`vmm.c`中的`do_pgfault`函数，并且在实现FIFO算法的`swap_fifo.c`中完成`map_swappable`和`swap_out_vistim`函数。通过对`swap`的测试。
+如果可以得到如 附录A所示的显示内容（仅供参考，不是标准答案输出），则基本正确。
 
 ---
 
-### 2.1 页面换入
+### 3.1 `proc_run`函数
 
-页面替换分为页面换出和页面换入，换入在练习一的`do_pgfault`函数中实现了，重述一遍思路就是：`do_pgfault`函数会判断产生访问异常的地址属于`check_mm_struct`某个`vma`表示的合法虚拟地址空间，且保存在硬盘`swap`文件中（即对应的PTE的高24位不为0，而最低位为0），则是执行页换入的时机，将调用`swap_in`函数完成页面换入。
-
-### 2.2 页面换出
-
-* 积极换出策略：操作系统周期性地（或在系统不忙的时候）主动把某些认为“不常用”的页换出到硬盘上，从而确保系统中总有一定数量的空闲页存在，这样当需要空闲页时，基本上能够及时满足需求
-* 消极换出策略：当试图得到空闲页时，发现当前没有空闲的物理页可供分配，这时才开始查找“不常用”页面，并把一个或多个这样的页换出到硬盘上
-
-ucore采用的是消极的换出策略。
-
-### 2.3 一个页替换算法的类框架`swap_manager`
-
-`swap.h`
+`proc.h`173-187
 
 ```
-struct swap_manager
-{
-     const char *name;
-     /* Global initialization for the swap manager */
-     int (*init)            (void);
-     /* Initialize the priv data inside mm_struct */
-     int (*init_mm)         (struct mm_struct *mm);
-     /* Called when tick interrupt occured */
-     int (*tick_event)      (struct mm_struct *mm);
-     /* Called when map a swappable page into the mm_struct */
-     int (*map_swappable)   (struct mm_struct *mm, uintptr_t addr, struct Page *page, int swap_in);
-     /* When a page is marked as shared, this routine is called to
-      * delete the addr entry from the swap manager */
-     int (*set_unswappable) (struct mm_struct *mm, uintptr_t addr);
-     /* Try to swap out a page, return then victim */
-     int (*swap_out_victim) (struct mm_struct *mm, struct Page **ptr_page, int in_tick);
-     /* check the page relpacement algorithm */
-     int (*check_swap)(void);     
-};
-```
-
-* `map_swappable`函数用于记录页访问情况相关属性
-* `swap_out_vistim`函数用于挑选需要换出的页
-* `tick_event`函数指针结合定时产生的中断，可以实现一种积极的换页策略
-
-### 2.4 FIFO替换算法实现
-
-`kern/mm/swap_fifo.c`
-
-FIFO 替换算法会维护一个队列，队列按照页面调用的次序排列，越早被加载到内存的页面会越早被换出。
-
-#### `_fifo_map_swappable`函数
-
-44-56，增加了一句`list_add(head, entry)`，这个函数用于把最近被用到的页面添加到算法所维护的队列中。
-
-```
-static int
-_fifo_map_swappable(struct mm_struct *mm, uintptr_t addr, struct Page *page, int swap_in)
-{
-    list_entry_t *head=(list_entry_t*) mm->sm_priv;
-    list_entry_t *entry=&(page->pra_page_link);
- 
-    assert(entry != NULL && head != NULL);
-    //record the page access situlation
-    /*LAB3 EXERCISE 2: YOUR CODE*/ 
-    //(1)link the most recent arrival page at the back of the pra_list_head qeueue.
-    //基于双向链表实现，将新加入的元素（最近用的）插入到可换出物理页链表的末尾
-    list_add(head, entry);
-    return 0;
+void
+proc_run(struct proc_struct *proc) {
+    // 判断需要运行的线程是否已经运行
+    if (proc != current) {
+        bool intr_flag;
+        struct proc_struct *prev = current, *next = proc;
+        //关闭中断，避免在进程切换过程中出现中断
+        local_intr_save(intr_flag);
+        {
+            //将当前进程换为要切换到的进程
+            current = proc;
+            //设置任务状态段tss中的特权级0下的esp0指针为next内核线程的内核栈的栈顶
+            load_esp0(next->kstack + KSTACKSIZE);
+            //重新加载cr3寄存器(页目录表基址) 进行进程间的页表切换，修改当前的cr3寄存器成需要运行线程（进程）的页目录表
+            lcr3(next->cr3);
+        }
+            //调用switch_to进行上下文的保存与切换，切换到新的线程
+            switch_to(&(prev->context), &(next->context));
+        }
+        //恢复中断
+        local_intr_restore(intr_flag);
+    }
 }
 ```
 
-#### `_fifo_swap_out_victim`函数
+### 3.2 问题
 
-61-79，这个函数用来查询哪个页面需要被换出。
+#### 在本实验的执行过程中，创建且运行了几个内核线程？
+
+两个。
+
+* 第 0 个内核线程 idleproc：在完成新的内核线程的创建以及各种初始化工作之后，用于调度其他进程或线程。
+* 第 1 个内核线程 initproc：只用来打印字符串。
+
+#### 语句`local_intr_save(intr_flag);....local_intr_restore(intr_flag);`在这里有何作用?请说明理由
+
+在进行进程切换的时候，需要避免出现中断干扰这个过程，所以需要在上下文切换期间清除`intr_flag`位屏蔽中断，并且在进程恢复执行后恢复`intr_flag`位。
+
+### 3.3 运行结果
 
 ```
-static int
-_fifo_swap_out_victim(struct mm_struct *mm, struct Page ** ptr_page, int in_tick)
-{
-     list_entry_t *head=(list_entry_t*) mm->sm_priv;
-         assert(head != NULL);
-     assert(in_tick==0);
-     /* Select the victim */
-     /*LAB3 EXERCISE 2: YOUR CODE*/ 
-     //(1)  unlink the  earliest arrival page in front of pra_list_head qeueue
-     //(2)  set the addr of addr of this page to ptr_page
-     /* Select the tail */
-     //需要被换出的页
-     list_entry_t *le = head->prev;
-     assert(head!=le);
-     //获得对应page的指针p
-     struct Page *p = le2page(le, pra_page_link);
-     //将最老的页面从队列中删除
-     list_del(le);
-     assert(p !=NULL);
-     //将这一页的地址存储在ptr_page中
-     *ptr_page = p;
-     return 0;
-}
+make qemu
 ```
 
-### 2.5 `make qemu`
+显示`check_swap() succeded!`
 
-成功输出`check_swap() succeeded!`，练习二实现。
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4famv0jj30g00dvwi1.jpg)
 
-![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9bshomh7rj30g40cc77u.jpg)
+## 4 本次遇到的问题
 
-### 2.6 问题
+swap交换空间不足。
 
-如果要在ucore上实现"extended clock页替换算法"请给你的设计方案，现有的swap_manager框架是否足以支持在ucore中实现此算法？如果是，请给你的设计方案。如果不是，请给出你的新的扩展和基此扩展的设计方案。并需要回答如下问题：
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4ml3i4yj30dj08wtbi.jpg)
 
-能支持。
+解决方法：删除一些没用或冗余的文件，并且在virtual box中设置内存大小。
 
-* 需要被换出的页的特征是什么？
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4obcstej30ig0dumym.jpg)
 
-对应的页表项的`PTE_A`为1表示被访问，对应的页表项的`PTE_D`为1表示被修改。
-
-那么（0，0）表示最近未被引用也未被修改，首先选择此页淘汰；（0，1）最近未被使用，但被修改，其次选择；（1，0）最近使用而未修改，再次选择；（1，1）最近使用且修改，最后选择。
-
-* 在ucore中如何判断具有这样特征的页？
-
-当该页被访问时，CPU中的MMU硬件将把访问位置“1”。当该页被“写”时，CPU中的MMU硬件将把修改位置“1”。
-
-* 何时进行换入和换出操作？
-
-换入：发生缺页异常，保存在磁盘中的内容要被访问需要换入。
-
-当ucore或应用程序访问地址所在的页不在内存时，就会产生page fault异常，引起调用`do_pgfault`函数，此函数会判断产生访问异常的地址属于`check_mm_struct`某个vma表示的合法虚拟地址空间，且保存在硬盘swap文件中（即对应的PTE的高24位不为0，而最低位为0），则是执行页换入的时机，将调用`swap_in`函数完成页面换入。
-
-换出：物理页帧满的时候，当位于物理页框中的内存被页面替换算法选择需要换出。
+但是治标不治本，需要尽快研究出新的方法来。
