@@ -454,7 +454,7 @@ make qemu
 
 显示`check_swap() succeded!`
 
-![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4famv0jj30g00dvwi1.jpg)
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9dxzk1scaj30fw0blqde.jpg)
 
 ## 4 本次遇到的问题
 
@@ -466,7 +466,7 @@ make qemu
 
 ![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4obcstej30ig0dumym.jpg)
 
-但是治标不治本，需要尽快研究出新的方法来。
+但是治标不治本，需要研究新建未分配空间然后挂载磁盘的方法。
 
 ### 4.2 swap.img文件过大无法push
 

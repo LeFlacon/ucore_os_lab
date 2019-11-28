@@ -454,11 +454,11 @@ make qemu
 
 显示`check_swap() succeded!`
 
-![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4famv0jj30g00dvwi1.jpg)
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9dxzk1scaj30fw0blqde.jpg)
 
 ## 4 本次遇到的问题
 
-swap交换空间不足。
+### 4.1 swap交换空间不足
 
 ![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4ml3i4yj30dj08wtbi.jpg)
 
@@ -467,3 +467,9 @@ swap交换空间不足。
 ![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d4obcstej30ig0dumym.jpg)
 
 但是治标不治本，需要尽快研究出新的方法来。
+
+### 4.2 swap.img文件过大无法push
+
+![](https://tva1.sinaimg.cn/large/006y8mN6ly1g9d5cncv3uj30nh0ak428.jpg)
+
+查看日志，`git reset`回之前的版本，然后把`make clean`后的文件提交上去
